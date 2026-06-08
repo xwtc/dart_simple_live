@@ -201,7 +201,18 @@ class DtvSyncService extends GetxService {
     entries['followedStreamers'] = json.encode(followed);
     entries['followFolders'] = json.encode(folders);
     entries['followListOrder'] = json.encode(
-      followed.map((s) => s['id']).toList(),
+      followed.map((s) => {
+        'type': 'streamer',
+        'data': <String, dynamic>{
+          'id': s['id'],
+          'platform': s['platform'],
+          'nickname': s['nickname'],
+          'avatarUrl': s['avatarUrl'],
+          'roomTitle': s['roomTitle'],
+          'currentRoomId': s['currentRoomId'],
+          'liveStatus': s['liveStatus'],
+        },
+      }).toList(),
     );
     entries['danmu_block_keywords'] = json.encode(keywords);
 
