@@ -2,9 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:get/get.dart';
-import 'package:multicast_dns/multicast_dns.dart';
+import 'package:mdns_dart/mdns_dart.dart' as mdns;
 import 'package:network_info_plus/network_info_plus.dart';
 import 'package:simple_live_app/app/constant.dart';
 import 'package:simple_live_app/app/event_bus.dart';
@@ -20,8 +19,8 @@ import 'package:uuid/uuid.dart';
 
 /// DTV-compatible bidirectional sync service.
 ///
-/// - Runs a DTV-protocol HTTP server on port 38999 so DTV desktop/Android
-///   can discover (via mDNS) and import Simple Live data.
+/// - Runs a DTV-protocol HTTP server on port 38999 and advertises via mDNS
+///   so DTV desktop/Android can discover and import Simple Live data.
 /// - Can discover DTV devices via mDNS and import their data into Simple Live.
 class DtvSyncService extends GetxService {
   static DtvSyncService get instance => Get.find<DtvSyncService>();
@@ -32,7 +31,8 @@ class DtvSyncService extends GetxService {
   static const String defaultToken = 'dtv';
   static const String syncKind = 'dtv-lan-sync';
   static const int syncVersion = 1;
-  static const String mdnsServiceType = '_dtv-lan-sync._tcp.local.';
+  // DTV uses _dtv-lan-sync._tcp, mdns_dart omits .local automatically
+  static const String mdnsServiceType = '_dtv-lan-sync._tcp';
 
   final NetworkInfo _networkInfo = NetworkInfo();
 
@@ -48,7 +48,7 @@ class DtvSyncService extends GetxService {
   var discoveredPeers = <DtvPeer>[].obs;
 
   HttpServer? _server;
-  MDnsClient? _mdnsClient;
+  mdns.MDNSServer? _mdnsServer;
   final Uuid _uuid = const Uuid();
 
   // ======================================================================
@@ -106,7 +106,7 @@ class DtvSyncService extends GetxService {
               ? 'OFFLINE'
               : 'UNKNOWN';
       return {
-        'id': '$platform:${user.roomId}',
+        'id': user.roomId,
         'platform': platform,
         'nickname': user.userName,
         'avatarUrl': user.face,
@@ -117,13 +117,26 @@ class DtvSyncService extends GetxService {
     }).toList();
   }
 
+  /// Convert Simple Live tag userIds (e.g. "douyu_5551871") to DTV format
+  /// (e.g. "DOUYU:5551871").
+  List<String> _tagUserIdsToDtvFormat(FollowUserTag tag) {
+    return tag.userId.map((uid) {
+      final underscoreIdx = uid.indexOf('_');
+      if (underscoreIdx <= 0) return uid;
+      final siteId = uid.substring(0, underscoreIdx);
+      final roomId = uid.substring(underscoreIdx + 1);
+      final platform = siteIdToPlatform(siteId);
+      return '$platform:$roomId';
+    }).toList();
+  }
+
   List<Map<String, dynamic>> _buildFollowFolders() {
     final tags = DBService.instance.tagBox.values.toList();
     return tags.map((tag) {
       return {
         'id': tag.id,
         'name': tag.tag,
-        'streamerIds': tag.userId,
+        'streamerIds': _tagUserIdsToDtvFormat(tag),
       };
     }).toList();
   }
@@ -195,7 +208,7 @@ class DtvSyncService extends GetxService {
   }
 
   // ======================================================================
-  // Server start / stop
+  // Server start / stop (including mDNS advertising)
   // ======================================================================
 
   Future<String> _getLocalIP() async {
@@ -222,6 +235,7 @@ class DtvSyncService extends GetxService {
     if (running.value) return;
 
     try {
+      // 1. Start HTTP server
       final router = Router();
       router.get(dtvSyncPath, _handleManifest);
       router.get(dtvSyncPayloadPath, _handlePayload);
@@ -251,6 +265,29 @@ class DtvSyncService extends GetxService {
       ipAddress.value = ip;
 
       Log.d('DTV sync serving at http://$ip:${server.port}$dtvSyncPath');
+
+      // 2. Start mDNS advertising using mdns_dart
+      try {
+        _mdnsServer = mdns.MDNSServer(mdns.MDNSServerConfig(
+          services: [
+            mdns.MDNSService(
+              name: 'dtv-sync-simplelive-${server.port}',
+              type: mdnsServiceType,
+              port: server.port,
+              txtRecords: {
+                'kind': syncKind,
+                'ver': syncVersion.toString(),
+                'path': dtvSyncPath,
+                'token': token.value,
+              },
+            ),
+          ],
+        ));
+        await _mdnsServer!.start();
+        Log.d('DTV mDNS advertising started for $mdnsServiceType');
+      } catch (e) {
+        Log.logPrint('DTV mDNS advertise error (non-fatal): $e');
+      }
     } catch (e) {
       errorMsg.value = e.toString();
       Log.logPrint('DTV sync start error: $e');
@@ -258,6 +295,8 @@ class DtvSyncService extends GetxService {
   }
 
   Future<void> stop() async {
+    await _mdnsServer?.stop();
+    _mdnsServer = null;
     await _server?.close(force: true);
     _server = null;
     running.value = false;
@@ -274,90 +313,48 @@ class DtvSyncService extends GetxService {
   }
 
   // ======================================================================
-  // Client: mDNS discovery
+  // Client: mDNS discovery using mdns_dart
   // ======================================================================
 
-  Future<List<DtvPeer>> discoverPeers({Duration timeout = const Duration(seconds: 3)}) async {
+  Future<List<DtvPeer>> discoverPeers() async {
     if (discovering.value) return discoveredPeers.toList();
 
     discovering.value = true;
     discoveredPeers.clear();
 
     try {
-      _mdnsClient = MDnsClient();
-      await _mdnsClient!.start();
+      final results = await mdns.MDNSClient.discover(mdnsServiceType).timeout(
+        const Duration(seconds: 5),
+        onTimeout: () {
+          Log.d('mDNS discovery timeout');
+          return <mdns.MDNSService>[];
+        },
+      );
 
-      // multicast_dns lookup returns a Stream — use await for
-      await for (final ptr in _mdnsClient!.lookup<PtrResourceRecord>(
-        ResourceRecordQuery.serverPointer(mdnsServiceType),
-      )) {
-        await _resolvePeer(ptr);
-      }
+      for (final service in results) {
+        final host = service.primaryAddress?.address;
+        if (host == null) continue;
 
-      _mdnsClient?.stop();
-      _mdnsClient = null;
-    } catch (e) {
-      Log.logPrint('mDNS discovery error: $e');
-      _mdnsClient?.stop();
-      _mdnsClient = null;
-    }
+        final svcPort = service.port;
+        final token = service.txtRecords['token'] ?? defaultToken;
+        final baseUrl = 'http://$host:$svcPort';
 
-    discovering.value = false;
-    return discoveredPeers.toList();
-  }
-
-  Future<void> _resolvePeer(PtrResourceRecord ptr) async {
-    try {
-      await for (final srv in _mdnsClient!.lookup<SrvResourceRecord>(
-        ResourceRecordQuery.service(ptr.domainName),
-      )) {
-        final port = srv.port;
-        final host = srv.target;
-
-        // Resolve IP
-        String? ip;
-        try {
-          await for (final addr in _mdnsClient!.lookup<IPAddressResourceRecord>(
-            ResourceRecordQuery.addressIPv4(host),
-          )) {
-            ip = addr.address.address;
-            break; // take first IPv4
-          }
-        } catch (_) {}
-
-        if (ip == null) continue;
-
-        // Resolve TXT records for token
-        String token = defaultToken;
-        try {
-          await for (final txt in _mdnsClient!.lookup<TxtResourceRecord>(
-            ResourceRecordQuery.text(ptr.domainName),
-          )) {
-            final text = txt.text;
-            if (text.startsWith('token=')) {
-              token = text.substring(6);
-            }
-          }
-        } catch (_) {}
-
-        final baseUrl = 'http://$ip:$port';
         if (!discoveredPeers.any((p) => p.baseUrl == baseUrl)) {
           discoveredPeers.add(DtvPeer(
-            name: ptr.domainName.replaceFirst('._dtv-lan-sync._tcp.local.', ''),
-            host: ip,
-            port: port,
+            name: service.name,
+            host: host,
+            port: svcPort,
             token: token,
             baseUrl: baseUrl,
           ));
         }
       }
-    } catch (_) {}
-  }
+    } catch (e) {
+      Log.logPrint('mDNS discovery error: $e');
+    }
 
-  void stopDiscovery() {
-    _mdnsClient?.stop();
-    _mdnsClient = null;
     discovering.value = false;
+    return discoveredPeers.toList();
   }
 
   // ======================================================================
@@ -406,14 +403,15 @@ class DtvSyncService extends GetxService {
       final followedRaw = entries['followedStreamers'];
       if (followedRaw is String) {
         final List<dynamic> followedList = json.decode(followedRaw);
-        final tagUpdates = <String, String>{}; // followUserId -> tagName
 
         for (final item in followedList) {
           if (item is! Map<String, dynamic>) continue;
 
           final platform = item['platform'] as String? ?? '';
           final siteId = platformToSiteId(platform);
-          final roomId = item['currentRoomId'] as String? ?? item['id']?.toString().split(':').last ?? '';
+          // DTV id is raw roomId, currentRoomId is also roomId
+          final roomId = item['currentRoomId'] as String? ??
+              item['id']?.toString() ?? '';
           final userName = item['nickname'] as String? ?? '';
           final face = item['avatarUrl'] as String? ?? '';
 
@@ -462,7 +460,7 @@ class DtvSyncService extends GetxService {
             addedTags++;
           }
 
-          // Map DTV streamer IDs ("BILIBILI:12345") to Simple Live IDs ("bilibili_12345")
+          // Map DTV streamer IDs ("DOUYU:5551871") to Simple Live IDs ("douyu_5551871")
           for (final dtvId in streamerIds) {
             final parts = dtvId.split(':');
             if (parts.length < 2) continue;
@@ -492,8 +490,8 @@ class DtvSyncService extends GetxService {
 
   @override
   void onClose() {
+    _mdnsServer?.stop();
     _server?.close(force: true);
-    _mdnsClient?.stop();
     super.onClose();
   }
 }
