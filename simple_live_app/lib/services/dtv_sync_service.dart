@@ -287,26 +287,12 @@ class DtvSyncService extends GetxService {
       _mdnsClient = MDnsClient();
       await _mdnsClient!.start();
 
-      final completer = Completer<void>();
-      final seenHosts = <String>{};
-
-      _mdnsClient!.lookup<PtrResourceRecord>(
-        ResourceRecordQuery.service(mdnsServiceType),
-        timeout: timeout,
-      ).then((ptrRecords) {
-        final futures = <Future>[];
-        for (final ptr in ptrRecords) {
-          futures.add(_resolvePeer(ptr, seenHosts));
-        }
-        return Future.wait(futures).then((_) => completer.complete());
-      }).catchError((e) {
-        Log.logPrint('mDNS browse error: $e');
-        completer.complete();
-      });
-
-      await completer.future.timeout(timeout + const Duration(seconds: 2), onTimeout: () {
-        Log.d('mDNS discovery timeout');
-      });
+      // multicast_dns lookup returns a Stream — use await for
+      await for (final ptr in _mdnsClient!.lookup<PtrResourceRecord>(
+        ResourceRecordQuery.serverPointer(mdnsServiceType),
+      )) {
+        await _resolvePeer(ptr);
+      }
 
       _mdnsClient?.stop();
       _mdnsClient = null;
@@ -320,27 +306,22 @@ class DtvSyncService extends GetxService {
     return discoveredPeers.toList();
   }
 
-  Future<void> _resolvePeer(PtrResourceRecord ptr, Set<String> seenHosts) async {
+  Future<void> _resolvePeer(PtrResourceRecord ptr) async {
     try {
-      final srvRecords = await _mdnsClient!.lookup<SrvResourceRecord>(
-        ResourceRecordQuery.service(ptr.name),
-      );
-
-      for (final srv in srvRecords) {
+      await for (final srv in _mdnsClient!.lookup<SrvResourceRecord>(
+        ResourceRecordQuery.service(ptr.domainName),
+      )) {
         final port = srv.port;
         final host = srv.target;
-
-        if (seenHosts.contains(host)) continue;
-        seenHosts.add(host);
 
         // Resolve IP
         String? ip;
         try {
-          final addresses = await _mdnsClient!.lookup<IPAddressResourceRecord>(
+          await for (final addr in _mdnsClient!.lookup<IPAddressResourceRecord>(
             ResourceRecordQuery.addressIPv4(host),
-          );
-          if (addresses.isNotEmpty) {
-            ip = addresses.first.address.address;
+          )) {
+            ip = addr.address.address;
+            break; // take first IPv4
           }
         } catch (_) {}
 
@@ -349,10 +330,9 @@ class DtvSyncService extends GetxService {
         // Resolve TXT records for token
         String token = defaultToken;
         try {
-          final txtRecords = await _mdnsClient!.lookup<TxtResourceRecord>(
-            ResourceRecordQuery.text(ptr.name),
-          );
-          for (final txt in txtRecords) {
+          await for (final txt in _mdnsClient!.lookup<TxtResourceRecord>(
+            ResourceRecordQuery.text(ptr.domainName),
+          )) {
             final text = txt.text;
             if (text.startsWith('token=')) {
               token = text.substring(6);
@@ -363,7 +343,7 @@ class DtvSyncService extends GetxService {
         final baseUrl = 'http://$ip:$port';
         if (!discoveredPeers.any((p) => p.baseUrl == baseUrl)) {
           discoveredPeers.add(DtvPeer(
-            name: srv.name.replaceAll('._dtv-lan-sync._tcp.local.', ''),
+            name: ptr.domainName.replaceFirst('._dtv-lan-sync._tcp.local.', ''),
             host: ip,
             port: port,
             token: token,
