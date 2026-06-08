@@ -22,10 +22,6 @@ class DtvSyncController extends GetxController {
     await service.toggle();
   }
 
-  Future<void> refreshPeers() async {
-    await service.discoverPeers();
-  }
-
   Future<void> connectManual(String address) async {
     final trimmed = address.trim();
     if (trimmed.isEmpty) {

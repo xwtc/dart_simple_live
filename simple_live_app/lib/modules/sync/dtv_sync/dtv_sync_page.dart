@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
-import 'package:remixicon/remixicon.dart';
 import 'package:simple_live_app/app/app_style.dart';
 import 'package:simple_live_app/modules/sync/dtv_sync/dtv_sync_controller.dart';
 import 'package:simple_live_app/services/dtv_sync_service.dart';
@@ -97,63 +96,11 @@ class DtvSyncPage extends GetView<DtvSyncController> {
 
           AppStyle.vGap12,
 
-          // ---- Client: mDNS discovery ----
-          SettingsCard(
-            child: Column(
-              children: [
-                ListTile(
-                  leading: const Icon(Remix.search_eye_line),
-                  title: const Text('搜索局域网 DTV 设备'),
-                  subtitle: Obx(() => Text(
-                        '发现 ${controller.service.discoveredPeers.length} 个设备',
-                      )),
-                  trailing: Obx(() => controller.service.discovering.value
-                      ? const SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.chevron_right)),
-                  onTap: controller.refreshPeers,
-                ),
-                AppStyle.divider,
-                Obx(() {
-                  final peers = controller.service.discoveredPeers;
-                  if (peers.isEmpty) {
-                    return ListTile(
-                      title: Text(
-                        controller.service.discovering.value
-                            ? '正在搜索...'
-                            : '点击搜索或手动输入上方地址',
-                        style: const TextStyle(color: Colors.grey),
-                      ),
-                    );
-                  }
-                  return Column(
-                    children: peers.map((peer) => Column(
-                      children: [
-                        ListTile(
-                          title: Text(peer.name),
-                          subtitle: Text('${peer.host}:${peer.port}'),
-                          trailing: TextButton(
-                            onPressed: () => controller.importFromPeer(peer),
-                            child: const Text('导入'),
-                          ),
-                        ),
-                        if (peer != peers.last) AppStyle.divider,
-                      ],
-                    )).toList(),
-                  );
-                }),
-              ],
-            ),
-          ),
-
           Padding(
             padding: AppStyle.edgeInsetsA12.copyWith(top: 24),
             child: const Text(
-              '说明：启动共享服务后，DTV 桌面版可自动通过 mDNS 发现此设备并导入关注列表和标签。'
-              '手动输入 DTV 设备的 IP 地址可直接连接导入，无需 mDNS 发现。',
+              '说明：启动共享服务后，在 DTV 桌面版手动输入本机 IP 即可导入关注列表和标签。'
+              '手动输入 DTV 设备的 IP 地址可直接连接导入。',
               style: TextStyle(color: Colors.grey, fontSize: 13),
             ),
           ),
