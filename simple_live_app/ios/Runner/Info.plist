@@ -64,6 +64,12 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>用于扫描二维码</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>用于局域网内发现 DTV 同步设备</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_dtv-lan-sync._tcp</string>
+	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

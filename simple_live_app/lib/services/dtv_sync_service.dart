@@ -13,6 +13,7 @@ import 'package:simple_live_app/app/utils.dart';
 import 'package:simple_live_app/models/db/follow_user.dart';
 import 'package:simple_live_app/models/db/follow_user_tag.dart';
 import 'package:simple_live_app/services/db_service.dart';
+import 'package:simple_live_app/services/local_storage_service.dart';
 import 'package:shelf/shelf.dart' as shelf;
 import 'package:shelf/shelf_io.dart' as shelf_io;
 import 'package:shelf_router/shelf_router.dart';
@@ -521,10 +522,12 @@ class DtvSyncService extends GetxService {
       final keywordsRaw = entries['danmu_block_keywords'];
       if (keywordsRaw is String) {
         final List<dynamic> keywordsList = json.decode(keywordsRaw);
+        final shieldBox = LocalStorageService.instance.shieldBox;
         for (final kw in keywordsList) {
           if (kw is String && kw.trim().isNotEmpty) {
-            if (!AppSettingsController.instance.shieldList.contains(kw.trim())) {
-              AppSettingsController.instance.addShieldList(kw.trim());
+            final trimmed = kw.trim();
+            if (!shieldBox.containsKey(trimmed)) {
+              AppSettingsController.instance.addShieldList(trimmed);
               addedKeywords++;
             }
           }
