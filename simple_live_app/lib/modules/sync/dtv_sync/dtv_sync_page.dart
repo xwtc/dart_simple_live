@@ -63,11 +63,41 @@ class DtvSyncPage extends GetView<DtvSyncController> {
             ),
           ),
 
-          // ---- Client section ----
+          // ---- Client: manual input section ----
           Padding(
             padding: AppStyle.edgeInsetsA12.copyWith(top: 24),
             child: Text('从 DTV 导入', style: Get.textTheme.titleSmall),
           ),
+          SettingsCard(
+            child: Padding(
+              padding: AppStyle.edgeInsetsA12,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
+                    controller: controller.addressController,
+                    onSubmitted: (value) => controller.connectManual(value),
+                    decoration: InputDecoration(
+                      labelText: '共享端地址',
+                      hintText: '输入 DTV 设备的 IP 地址，如 192.168.1.100',
+                      contentPadding: AppStyle.edgeInsetsH12,
+                      border: const OutlineInputBorder(),
+                    ),
+                  ),
+                  AppStyle.vGap12,
+                  ElevatedButton(
+                    onPressed: () => controller.connectManual(controller.addressController.text),
+                    child: const Text('连接并导入'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          AppStyle.vGap12,
+
+          // ---- Client: mDNS discovery ----
           SettingsCard(
             child: Column(
               children: [
@@ -94,7 +124,7 @@ class DtvSyncPage extends GetView<DtvSyncController> {
                       title: Text(
                         controller.service.discovering.value
                             ? '正在搜索...'
-                            : '点击上方搜索设备',
+                            : '点击搜索或手动输入上方地址',
                         style: const TextStyle(color: Colors.grey),
                       ),
                     );
@@ -123,7 +153,7 @@ class DtvSyncPage extends GetView<DtvSyncController> {
             padding: AppStyle.edgeInsetsA12.copyWith(top: 24),
             child: const Text(
               '说明：启动共享服务后，DTV 桌面版可自动通过 mDNS 发现此设备并导入关注列表和标签。'
-              '点击搜索可发现局域网内的 DTV 设备，导入其数据。',
+              '手动输入 DTV 设备的 IP 地址可直接连接导入，无需 mDNS 发现。',
               style: TextStyle(color: Colors.grey, fontSize: 13),
             ),
           ),
