@@ -58,7 +58,7 @@ dependencies:
   window_manager: ^0.5.1 #窗口管理
   floating: ^6.0.0 #PIP画中画
   flutter_inappwebview: ^6.1.5 #WebView
-  connectivity_plus: ^7.0.0 #网络状态
+  connectivity_plus: 7.0.0 #网络状态 (pinned: 7.1.1 uses iOS-only isUltraConstrained)
   qr_code_scanner_plus: ^2.0.14 #二维码扫描
   volume_controller: ^3.4.0 #音量控制
 
