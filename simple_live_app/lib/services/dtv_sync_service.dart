@@ -6,6 +6,7 @@ import 'package:get/get.dart';
 import 'package:mdns_dart/mdns_dart.dart' as mdns;
 import 'package:network_info_plus/network_info_plus.dart';
 import 'package:simple_live_app/app/constant.dart';
+import 'package:simple_live_app/app/controller/app_settings_controller.dart';
 import 'package:simple_live_app/app/event_bus.dart';
 import 'package:simple_live_app/app/log.dart';
 import 'package:simple_live_app/app/utils.dart';
@@ -18,10 +19,6 @@ import 'package:shelf_router/shelf_router.dart';
 import 'package:uuid/uuid.dart';
 
 /// DTV-compatible bidirectional sync service.
-///
-/// - Runs a DTV-protocol HTTP server on port 38999 and advertises via mDNS
-///   so DTV desktop/Android can discover and import Simple Live data.
-/// - Can discover DTV devices via mDNS and import their data into Simple Live.
 class DtvSyncService extends GetxService {
   static DtvSyncService get instance => Get.find<DtvSyncService>();
 
@@ -31,19 +28,16 @@ class DtvSyncService extends GetxService {
   static const String defaultToken = 'dtv';
   static const String syncKind = 'dtv-lan-sync';
   static const int syncVersion = 1;
-  // DTV uses _dtv-lan-sync._tcp, mdns_dart omits .local automatically
   static const String mdnsServiceType = '_dtv-lan-sync._tcp';
 
   final NetworkInfo _networkInfo = NetworkInfo();
 
-  // ---- Server state ----
   var running = false.obs;
   var ipAddress = ''.obs;
   var port = dtvSyncPort.obs;
   var errorMsg = ''.obs;
   var token = defaultToken.obs;
 
-  // ---- mDNS discovery state ----
   var discovering = false.obs;
   var discoveredPeers = <DtvPeer>[].obs;
 
@@ -86,7 +80,24 @@ class DtvSyncService extends GetxService {
   }
 
   // ======================================================================
-  // Server: export Simple Live data as DTV payload
+  // DTV id helpers — handles both "12345" and "DOUYU:12345" formats
+  // ======================================================================
+
+  /// Extract bare roomId from a DTV id field (may be "12345" or "DOUYU:12345").
+  static String extractRoomId(String rawId) {
+    final colonIdx = rawId.indexOf(':');
+    return colonIdx >= 0 ? rawId.substring(colonIdx + 1) : rawId;
+  }
+
+  /// Build Simple Live followId from DTV platform and roomId.
+  static String buildFollowId(String platform, String roomId) {
+    final bareRoomId = extractRoomId(roomId);
+    final siteId = platformToSiteId(platform);
+    return '${siteId}_$bareRoomId';
+  }
+
+  // ======================================================================
+  // Export: Simple Live → DTV payload
   // ======================================================================
 
   Map<String, dynamic> _buildSource() {
@@ -105,6 +116,7 @@ class DtvSyncService extends GetxService {
           : user.liveStatus.value == 1
               ? 'OFFLINE'
               : 'UNKNOWN';
+      // DTV expects id as bare roomId (no platform prefix), currentRoomId as backup
       return {
         'id': user.roomId,
         'platform': platform,
@@ -117,8 +129,7 @@ class DtvSyncService extends GetxService {
     }).toList();
   }
 
-  /// Convert Simple Live tag userIds (e.g. "douyu_5551871") to DTV format
-  /// (e.g. "DOUYU:5551871").
+  /// Convert Simple Live tag userIds ("douyu_5551871") → DTV format ("DOUYU:5551871").
   List<String> _tagUserIdsToDtvFormat(FollowUserTag tag) {
     return tag.userId.map((uid) {
       final underscoreIdx = uid.indexOf('_');
@@ -141,6 +152,11 @@ class DtvSyncService extends GetxService {
     }).toList();
   }
 
+  /// Export danmu block keywords from Simple Live shield list.
+  List<String> _buildDanmuBlockKeywords() {
+    return AppSettingsController.instance.shieldList.toList();
+  }
+
   bool _checkToken(shelf.Request request) {
     final t = request.requestedUri.queryParameters['token'];
     return t == token.value;
@@ -153,6 +169,7 @@ class DtvSyncService extends GetxService {
 
     final followed = DBService.instance.followBox.values.toList();
     final tags = DBService.instance.tagBox.values.toList();
+    final keywords = _buildDanmuBlockKeywords();
 
     final manifest = {
       'kind': syncKind,
@@ -164,6 +181,7 @@ class DtvSyncService extends GetxService {
         'followFolders': tags.length,
         'followListOrder': followed.length,
         'customCategories': 0,
+        'danmuBlockKeywords': keywords.length,
         'totalBytes': 0,
       },
     };
@@ -177,6 +195,7 @@ class DtvSyncService extends GetxService {
   String _buildPayloadJson() {
     final followed = _buildFollowedStreamers();
     final folders = _buildFollowFolders();
+    final keywords = _buildDanmuBlockKeywords();
 
     final entries = <String, String>{};
     entries['followedStreamers'] = json.encode(followed);
@@ -184,6 +203,7 @@ class DtvSyncService extends GetxService {
     entries['followListOrder'] = json.encode(
       followed.map((s) => s['id']).toList(),
     );
+    entries['danmu_block_keywords'] = json.encode(keywords);
 
     final payload = {
       'kind': syncKind,
@@ -200,7 +220,6 @@ class DtvSyncService extends GetxService {
     if (!_checkToken(request)) {
       return shelf.Response.forbidden('invalid token');
     }
-
     return shelf.Response.ok(
       _buildPayloadJson(),
       headers: {'Content-Type': 'application/json'},
@@ -208,7 +227,7 @@ class DtvSyncService extends GetxService {
   }
 
   // ======================================================================
-  // Server start / stop (including mDNS advertising)
+  // Server start / stop (HTTP + mDNS advertising)
   // ======================================================================
 
   Future<String> _getLocalIP() async {
@@ -216,7 +235,6 @@ class DtvSyncService extends GetxService {
       final ip = await _networkInfo.getWifiIP();
       if (ip != null && ip.isNotEmpty) return ip;
     } catch (_) {}
-
     try {
       final interfaces = await NetworkInterface.list();
       for (final iface in interfaces) {
@@ -227,7 +245,6 @@ class DtvSyncService extends GetxService {
         }
       }
     } catch (_) {}
-
     return '0.0.0.0';
   }
 
@@ -235,7 +252,6 @@ class DtvSyncService extends GetxService {
     if (running.value) return;
 
     try {
-      // 1. Start HTTP server
       final router = Router();
       router.get(dtvSyncPath, _handleManifest);
       router.get(dtvSyncPayloadPath, _handlePayload);
@@ -263,13 +279,11 @@ class DtvSyncService extends GetxService {
 
       final ip = await _getLocalIP();
       ipAddress.value = ip;
-
       Log.d('DTV sync serving at http://$ip:${server.port}$dtvSyncPath');
 
-      // 2. Start mDNS advertising using mdns_dart
+      // Start mDNS advertising
       try {
-        final ip = await _getLocalIP();
-        final hostName = ip.replaceAll('.', '-');
+        final hostName = 'dtv-sync-simplelive';
         _mdnsServer = mdns.MDNSServer(mdns.MDNSServerConfig(
           zone: mdns.MDNSService(
             instance: 'dtv-sync-simplelive-${server.port}',
@@ -287,7 +301,7 @@ class DtvSyncService extends GetxService {
           ),
         ));
         await _mdnsServer!.start();
-        Log.d('DTV mDNS advertising started for $mdnsServiceType');
+        Log.d('DTV mDNS advertising started');
       } catch (e) {
         Log.logPrint('DTV mDNS advertise error (non-fatal): $e');
       }
@@ -316,7 +330,7 @@ class DtvSyncService extends GetxService {
   }
 
   // ======================================================================
-  // Client: mDNS discovery using mdns_dart
+  // Client: mDNS discovery
   // ======================================================================
 
   Future<List<DtvPeer>> discoverPeers() async {
@@ -328,10 +342,7 @@ class DtvSyncService extends GetxService {
     try {
       final results = await mdns.MDNSClient.discover(mdnsServiceType).timeout(
         const Duration(seconds: 5),
-        onTimeout: () {
-          Log.d('mDNS discovery timeout');
-          return <mdns.ServiceEntry>[];
-        },
+        onTimeout: () => <mdns.ServiceEntry>[],
       );
 
       for (final service in results) {
@@ -339,7 +350,6 @@ class DtvSyncService extends GetxService {
         if (host == null) continue;
 
         final svcPort = service.port;
-        // infoFields is List<String> of "key=value" TXT records
         final token = _parseTxtField(service.infoFields, 'token') ?? defaultToken;
         final baseUrl = 'http://$host:$svcPort';
 
@@ -361,7 +371,6 @@ class DtvSyncService extends GetxService {
     return discoveredPeers.toList();
   }
 
-  /// Parse TXT records (List<String> of "key=value") to find a specific key.
   String? _parseTxtField(List<String>? fields, String key) {
     if (fields == null) return null;
     final prefix = '$key=';
@@ -391,7 +400,6 @@ class DtvSyncService extends GetxService {
 
       final body = await response.transform(utf8.decoder).join();
       client.close();
-
       return json.decode(body) as Map<String, dynamic>;
     } catch (e) {
       Log.logPrint('DTV fetch error: $e');
@@ -400,20 +408,22 @@ class DtvSyncService extends GetxService {
   }
 
   // ======================================================================
-  // Client: import DTV payload into Simple Live
+  // Import: DTV payload → Simple Live
+  // Handles both "12345" and "DOUYU:12345" id formats from DTV.
   // ======================================================================
 
   Future<DtvImportResult> importFromPayload(Map<String, dynamic> payload) async {
     final entries = payload['entries'] as Map<String, dynamic>?;
     if (entries == null) {
-      return DtvImportResult(addedFollows: 0, addedTags: 0, error: 'No entries in payload');
+      return DtvImportResult(addedFollows: 0, addedTags: 0, addedKeywords: 0, error: 'No entries in payload');
     }
 
     var addedFollows = 0;
     var addedTags = 0;
+    var addedKeywords = 0;
 
     try {
-      // 1. Import followed streamers
+      // ---- 1. Import followed streamers ----
       final followedRaw = entries['followedStreamers'];
       if (followedRaw is String) {
         final List<dynamic> followedList = json.decode(followedRaw);
@@ -422,23 +432,27 @@ class DtvSyncService extends GetxService {
           if (item is! Map<String, dynamic>) continue;
 
           final platform = item['platform'] as String? ?? '';
-          final siteId = platformToSiteId(platform);
-          // DTV id is raw roomId, currentRoomId is also roomId
-          final roomId = item['currentRoomId'] as String? ??
-              item['id']?.toString() ?? '';
-          final userName = item['nickname'] as String? ?? '';
-          final face = item['avatarUrl'] as String? ?? '';
+          if (platform.isEmpty) continue;
 
+          final siteId = platformToSiteId(platform);
+          // Prefer currentRoomId, fallback to id (strip platform prefix if present)
+          final rawId = (item['currentRoomId'] as String?)?.ifNotEmpty ??
+              (item['id'] as String?)?.ifNotEmpty ?? '';
+          if (rawId.isEmpty) continue;
+          final roomId = extractRoomId(rawId);
           if (roomId.isEmpty) continue;
 
           final followId = '${siteId}_$roomId';
           if (DBService.instance.followBox.containsKey(followId)) continue;
 
+          final userName = (item['nickname'] as String?)?.ifNotEmpty ?? roomId;
+          final face = (item['avatarUrl'] as String?)?.ifNotEmpty ?? '';
+
           final follow = FollowUser(
             id: followId,
             roomId: roomId,
             siteId: siteId,
-            userName: userName.ifEmpty(roomId),
+            userName: userName,
             face: face,
             addTime: DateTime.now(),
             tag: '全部',
@@ -449,20 +463,20 @@ class DtvSyncService extends GetxService {
         }
       }
 
-      // 2. Import follow folders → tags
+      // ---- 2. Import followFolders → Simple Live tags ----
       final foldersRaw = entries['followFolders'];
       if (foldersRaw is String) {
         final List<dynamic> folders = json.decode(foldersRaw);
         for (final folder in folders) {
           if (folder is! Map<String, dynamic>) continue;
 
-          final folderName = folder['name'] as String? ?? '';
-          if (folderName.isEmpty) continue;
+          final folderName = (folder['name'] as String?)?.ifNotEmpty;
+          if (folderName == null) continue;
 
           final streamerIds = (folder['streamerIds'] as List<dynamic>?)
               ?.map((e) => e.toString())
+              .where((e) => e.isNotEmpty)
               .toList() ?? [];
-
           if (streamerIds.isEmpty) continue;
 
           // Find or create tag
@@ -474,12 +488,12 @@ class DtvSyncService extends GetxService {
             addedTags++;
           }
 
-          // Map DTV streamer IDs ("DOUYU:5551871") to Simple Live IDs ("douyu_5551871")
+          // Map DTV streamer IDs ("DOUYU:5551871" or "5551871") → Simple Live followId ("douyu_5551871")
           for (final dtvId in streamerIds) {
             final parts = dtvId.split(':');
-            if (parts.length < 2) continue;
-            final platform = parts[0];
-            final roomId = parts.sublist(1).join(':');
+            final roomId = parts.length >= 2 ? parts.sublist(1).join(':') : parts[0];
+            final platform = parts.length >= 2 ? parts[0] : null;
+            if (platform == null) continue; // can't map without platform
             final siteId = platformToSiteId(platform);
             final followId = '${siteId}_$roomId';
 
@@ -492,14 +506,28 @@ class DtvSyncService extends GetxService {
         }
       }
 
+      // ---- 3. Import danmu_block_keywords ----
+      final keywordsRaw = entries['danmu_block_keywords'];
+      if (keywordsRaw is String) {
+        final List<dynamic> keywordsList = json.decode(keywordsRaw);
+        for (final kw in keywordsList) {
+          if (kw is String && kw.trim().isNotEmpty) {
+            if (!AppSettingsController.instance.shieldList.contains(kw.trim())) {
+              AppSettingsController.instance.addShieldList(kw.trim());
+              addedKeywords++;
+            }
+          }
+        }
+      }
+
       // Refresh UI
       EventBus.instance.emit(Constant.kUpdateFollow, 0);
     } catch (e) {
       Log.logPrint('DTV import error: $e');
-      return DtvImportResult(addedFollows: addedFollows, addedTags: addedTags, error: e.toString());
+      return DtvImportResult(addedFollows: addedFollows, addedTags: addedTags, addedKeywords: addedKeywords, error: e.toString());
     }
 
-    return DtvImportResult(addedFollows: addedFollows, addedTags: addedTags);
+    return DtvImportResult(addedFollows: addedFollows, addedTags: addedTags, addedKeywords: addedKeywords);
   }
 
   @override
@@ -525,26 +553,32 @@ class DtvPeer {
     required this.token,
     required this.baseUrl,
   });
-
-  @override
-  String toString() => 'DtvPeer($name, $baseUrl)';
 }
 
 /// Result of a DTV data import.
 class DtvImportResult {
   final int addedFollows;
   final int addedTags;
+  final int addedKeywords;
   final String? error;
 
-  DtvImportResult({required this.addedFollows, required this.addedTags, this.error});
+  DtvImportResult({required this.addedFollows, required this.addedTags, required this.addedKeywords, this.error});
 
   bool get isSuccess => error == null;
   String get summary {
     if (error != null) return '导入失败: $error';
-    return '导入成功: ${addedFollows}个关注, ${addedTags}个标签';
+    final parts = <String>[];
+    if (addedFollows > 0) parts.add('${addedFollows}个关注');
+    if (addedTags > 0) parts.add('${addedTags}个标签');
+    if (addedKeywords > 0) parts.add('${addedKeywords}个屏蔽词');
+    return parts.isEmpty ? '没有新数据导入' : '导入成功: ${parts.join(', ')}';
   }
 }
 
-extension _StringExt on String {
+extension _StringExt on String? {
+  String? get ifNotEmpty => (this != null && this!.isNotEmpty) ? this : null;
+}
+
+extension _StringExt2 on String {
   String ifEmpty(String fallback) => isEmpty ? fallback : this;
 }
