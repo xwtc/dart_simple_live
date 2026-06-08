@@ -119,6 +119,16 @@ class SyncPage extends StatelessWidget {
                     Get.toNamed(RoutePath.kLocalSync);
                   },
                 ),
+                AppStyle.divider,
+                ListTile(
+                  title: const Text("DTV 数据互通"),
+                  subtitle: const Text("与 DTV 桌面版/Android 互相同步数据"),
+                  leading: const Icon(Remix.exchange_line),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () {
+                    Get.toNamed(RoutePath.kDtvSync);
+                  },
+                ),
               ],
             ),
           ),

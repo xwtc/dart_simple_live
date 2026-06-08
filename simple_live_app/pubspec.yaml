@@ -67,6 +67,7 @@ dependencies:
   shelf_router: ^1.1.4
   network_info_plus: ^7.0.0
   signalr_netcore: ^1.4.4 #SignalR
+  multicast_dns: ^0.3.2+4 #mDNS discovery for DTV sync
 
   # 视频播放
   media_kit: ^1.2.2

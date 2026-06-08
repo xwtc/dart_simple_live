@@ -11,6 +11,8 @@ import 'package:simple_live_app/modules/sync/remote_sync/webdav/remote_sync_webd
 import 'package:simple_live_app/modules/sync/remote_sync/webdav/remote_sync_webdav_controller.dart';
 import 'package:simple_live_app/modules/sync/remote_sync/webdav/remote_sync_webdav_page.dart';
 import 'package:simple_live_app/modules/sync/sync_page.dart';
+import 'package:simple_live_app/modules/sync/dtv_sync/dtv_sync_controller.dart';
+import 'package:simple_live_app/modules/sync/dtv_sync/dtv_sync_page.dart';
 import 'package:simple_live_app/modules/sync/remote_sync/room/remote_sync_room_controller.dart';
 import 'package:simple_live_app/modules/sync/remote_sync/room/remote_sync_room_page.dart';
 import 'package:simple_live_app/modules/search/search_controller.dart';
@@ -234,6 +236,14 @@ class AppPages {
     GetPage(
       name: RoutePath.kRemoteSyncWebDavConfig,
       page: () => const RemoteSyncWebDAVConfigPage(),
+    ),
+    // DTV 数据互通
+    GetPage(
+      name: RoutePath.kDtvSync,
+      page: () => const DtvSyncPage(),
+      bindings: [
+        BindingsBuilder.put(() => DtvSyncController()),
+      ],
     ),
     //其他设置
     GetPage(

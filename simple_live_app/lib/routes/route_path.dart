@@ -78,6 +78,9 @@ class RoutePath {
   /// 远程同步-WebDAVConfig
   static const kRemoteSyncWebDavConfig = "/remote_sync/webDAVConfig";
 
+  /// DTV 数据互通
+  static const kDtvSync = "/sync/dtv";
+
   /// 测试页面
   static const kTest = "/test";
 }
