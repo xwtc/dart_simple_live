@@ -1,9 +1,7 @@
-import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
 import 'package:get/get.dart';
-import 'package:mdns_dart/mdns_dart.dart' as mdns;
 import 'package:network_info_plus/network_info_plus.dart';
 import 'package:simple_live_app/app/constant.dart';
 import 'package:simple_live_app/app/controller/app_settings_controller.dart';
@@ -29,7 +27,6 @@ class DtvSyncService extends GetxService {
   static const String defaultToken = 'dtv';
   static const String syncKind = 'dtv-lan-sync';
   static const int syncVersion = 1;
-  static const String mdnsServiceType = '_dtv-lan-sync._tcp';
 
   final NetworkInfo _networkInfo = NetworkInfo();
 
@@ -39,11 +36,7 @@ class DtvSyncService extends GetxService {
   var errorMsg = ''.obs;
   var token = defaultToken.obs;
 
-  var discovering = false.obs;
-  var discoveredPeers = <DtvPeer>[].obs;
-
   HttpServer? _server;
-  mdns.MDNSServer? _mdnsServer;
   final Uuid _uuid = const Uuid();
 
   // ======================================================================
@@ -292,31 +285,6 @@ class DtvSyncService extends GetxService {
       final ip = await _getLocalIP();
       ipAddress.value = ip;
       Log.d('DTV sync serving at http://$ip:${server.port}$dtvSyncPath');
-
-      // Start mDNS advertising
-      try {
-        final hostName = 'dtv-sync-simplelive';
-        _mdnsServer = mdns.MDNSServer(mdns.MDNSServerConfig(
-          zone: mdns.MDNSService(
-            instance: 'dtv-sync-simplelive-${server.port}',
-            service: mdnsServiceType,
-            domain: 'local',
-            hostName: '$hostName.local.',
-            port: server.port,
-            ips: [InternetAddress(ip)],
-            txt: [
-              'kind=$syncKind',
-              'ver=$syncVersion',
-              'path=$dtvSyncPath',
-              'token=${token.value}',
-            ],
-          ),
-        ));
-        await _mdnsServer!.start();
-        Log.d('DTV mDNS advertising started');
-      } catch (e) {
-        Log.logPrint('DTV mDNS advertise error (non-fatal): $e');
-      }
     } catch (e) {
       errorMsg.value = e.toString();
       Log.logPrint('DTV sync start error: $e');
@@ -324,8 +292,6 @@ class DtvSyncService extends GetxService {
   }
 
   Future<void> stop() async {
-    await _mdnsServer?.stop();
-    _mdnsServer = null;
     await _server?.close(force: true);
     _server = null;
     running.value = false;
@@ -339,57 +305,6 @@ class DtvSyncService extends GetxService {
     } else {
       await start();
     }
-  }
-
-  // ======================================================================
-  // Client: mDNS discovery
-  // ======================================================================
-
-  Future<List<DtvPeer>> discoverPeers() async {
-    if (discovering.value) return discoveredPeers.toList();
-
-    discovering.value = true;
-    discoveredPeers.clear();
-
-    try {
-      final results = await mdns.MDNSClient.discover(mdnsServiceType).timeout(
-        const Duration(seconds: 5),
-        onTimeout: () => <mdns.ServiceEntry>[],
-      );
-
-      for (final service in results) {
-        final host = service.primaryAddress?.address;
-        if (host == null) continue;
-
-        final svcPort = service.port;
-        final token = _parseTxtField(service.infoFields, 'token') ?? defaultToken;
-        final baseUrl = 'http://$host:$svcPort';
-
-        if (!discoveredPeers.any((p) => p.baseUrl == baseUrl)) {
-          discoveredPeers.add(DtvPeer(
-            name: service.name,
-            host: host,
-            port: svcPort,
-            token: token,
-            baseUrl: baseUrl,
-          ));
-        }
-      }
-    } catch (e) {
-      Log.logPrint('mDNS discovery error: $e');
-    }
-
-    discovering.value = false;
-    return discoveredPeers.toList();
-  }
-
-  String? _parseTxtField(List<String>? fields, String key) {
-    if (fields == null) return null;
-    final prefix = '$key=';
-    for (final f in fields) {
-      if (f.startsWith(prefix)) return f.substring(prefix.length);
-    }
-    return null;
   }
 
   // ======================================================================
@@ -546,7 +461,6 @@ class DtvSyncService extends GetxService {
 
   @override
   void onClose() {
-    _mdnsServer?.stop();
     _server?.close(force: true);
     super.onClose();
   }
