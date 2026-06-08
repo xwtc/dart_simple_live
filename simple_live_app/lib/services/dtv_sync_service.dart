@@ -268,20 +268,23 @@ class DtvSyncService extends GetxService {
 
       // 2. Start mDNS advertising using mdns_dart
       try {
+        final ip = await _getLocalIP();
+        final hostName = ip.replaceAll('.', '-');
         _mdnsServer = mdns.MDNSServer(mdns.MDNSServerConfig(
-          services: [
-            mdns.MDNSService(
-              name: 'dtv-sync-simplelive-${server.port}',
-              type: mdnsServiceType,
-              port: server.port,
-              txtRecords: {
-                'kind': syncKind,
-                'ver': syncVersion.toString(),
-                'path': dtvSyncPath,
-                'token': token.value,
-              },
-            ),
-          ],
+          zone: mdns.MDNSService(
+            instance: 'dtv-sync-simplelive-${server.port}',
+            service: mdnsServiceType,
+            domain: 'local',
+            hostName: '$hostName.local.',
+            port: server.port,
+            ips: [InternetAddress(ip)],
+            txt: [
+              'kind=$syncKind',
+              'ver=$syncVersion',
+              'path=$dtvSyncPath',
+              'token=${token.value}',
+            ],
+          ),
         ));
         await _mdnsServer!.start();
         Log.d('DTV mDNS advertising started for $mdnsServiceType');
@@ -327,7 +330,7 @@ class DtvSyncService extends GetxService {
         const Duration(seconds: 5),
         onTimeout: () {
           Log.d('mDNS discovery timeout');
-          return <mdns.MDNSService>[];
+          return <mdns.ServiceEntry>[];
         },
       );
 
@@ -336,7 +339,8 @@ class DtvSyncService extends GetxService {
         if (host == null) continue;
 
         final svcPort = service.port;
-        final token = service.txtRecords['token'] ?? defaultToken;
+        // infoFields is List<String> of "key=value" TXT records
+        final token = _parseTxtField(service.infoFields, 'token') ?? defaultToken;
         final baseUrl = 'http://$host:$svcPort';
 
         if (!discoveredPeers.any((p) => p.baseUrl == baseUrl)) {
@@ -355,6 +359,16 @@ class DtvSyncService extends GetxService {
 
     discovering.value = false;
     return discoveredPeers.toList();
+  }
+
+  /// Parse TXT records (List<String> of "key=value") to find a specific key.
+  String? _parseTxtField(List<String>? fields, String key) {
+    if (fields == null) return null;
+    final prefix = '$key=';
+    for (final f in fields) {
+      if (f.startsWith(prefix)) return f.substring(prefix.length);
+    }
+    return null;
   }
 
   // ======================================================================
